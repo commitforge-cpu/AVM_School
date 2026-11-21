@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AvmSchool.Api</RootNamespace>
+    <AssemblyName>AvmSchool.Api</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Only needed when Database:Provider = "SqlServer". Restored automatically by `dotnet restore`. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Runtime data folders: never compiled, kept out of publish so uploads are not overwritten. -->
+    <Content Remove="App_Data\**" />
+    <None Remove="Gallery\**;StudentPhotos\**;App_Data\**" />
+  </ItemGroup>
+
+</Project>

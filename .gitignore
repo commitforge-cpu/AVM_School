@@ -1,0 +1,24 @@
+# .NET
+backend/**/bin/
+backend/**/obj/
+backend/AvmSchool.Api/App_Data/
+backend/AvmSchool.Api/StudentPhotos/*
+!backend/AvmSchool.Api/StudentPhotos/.gitkeep
+# Uploaded gallery photos (keep the folder itself)
+backend/AvmSchool.Api/Gallery/*
+!backend/AvmSchool.Api/Gallery/.gitkeep
+backend/AvmSchool.Api/appsettings.Production.json
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
+frontend/next-env.d.ts
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+*.user
