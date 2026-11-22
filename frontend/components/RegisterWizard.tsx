@@ -8,11 +8,14 @@ import Field from "./Field";
 import { useAuth } from "./AuthProvider";
 import type { ApiError } from "@/lib/api";
 import { ACCOUNT_FIELDS, STUDENT_GROUPS, initialValues, validateField, type FieldDef } from "@/lib/studentFields";
+import { TEST_PASSWORD, testRegistrationValues } from "@/lib/testRegistration";
 
 type Values = Record<string, string | boolean>;
 
 const REVIEW_STEP = STUDENT_GROUPS.length; // last step: account + review
 const STEP_TITLES = [...STUDENT_GROUPS.map((g) => g.title), "Account & review"];
+// "Fill test data" button: only in development (npm run dev), never on the live site.
+const SHOW_TEST_FILL = process.env.NODE_ENV !== "production";
 
 export default function RegisterWizard() {
   const router = useRouter();
@@ -63,6 +66,18 @@ export default function RegisterWizard() {
     const errs = validateStep(step);
     setErrors(errs);
     if (Object.keys(errs).length === 0) go(step + 1);
+  }
+
+  /** Fills every step with sample data and opens the review step; the user still clicks Submit. */
+  function fillTestData() {
+    setValues({ ...initialValues(), ...testRegistrationValues() });
+    setPassword(TEST_PASSWORD);
+    setConfirm(TEST_PASSWORD);
+    setDeclared(true);
+    setErrors({});
+    setFormError("");
+    setVisited(STEP_TITLES.map((_, i) => i));
+    go(REVIEW_STEP);
   }
 
   function pickPhoto(e: ChangeEvent<HTMLInputElement>) {
@@ -146,7 +161,14 @@ export default function RegisterWizard() {
       </ol>
 
       <form className="form-card" onSubmit={submit} noValidate>
-        {formError && <div className="alert alert-error" role="alert">{formError}</div>}
+        {SHOW_TEST_FILL && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: ".6rem 1rem",
+            padding: ".7rem 1rem", marginBottom: "1.4rem", border: "1px dashed var(--line-strong)", borderRadius: "var(--radius-s)" }}>
+            <span className="muted" style={{ fontSize: ".9rem" }}>Testing: fills every step with sample data. Hidden on the live site.</span>
+            <button type="button" className="btn btn-quiet btn-sm" onClick={fillTestData}>Fill test data</button>
+          </div>
+        )}
+        {formError &&<div className="alert alert-error" role="alert">{formError}</div>}
 
         {step < REVIEW_STEP ? (
           <>

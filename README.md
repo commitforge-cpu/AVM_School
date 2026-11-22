@@ -6,7 +6,7 @@ A 3D web portal for **Achala Vidya Mandira (AVM School), Rajajinagar, Bengaluru*
 |---|---|---|
 | Website (3D, all pages, login/register, admin panel) | Next.js 16, React 19, three.js / React Three Fiber | `frontend/` |
 | API (accounts, students, gallery uploads, page content) | ASP.NET Core Web API (.NET 10) | `backend/AvmSchool.Api/` |
-| Database script (not connected yet) | SQL Server | `database/01_create_database.sql` |
+| Database (AvmSchoolDb) | SQL Server | `database/01_create_database.sql` |
 
 ---
 
@@ -14,7 +14,7 @@ A 3D web portal for **Achala Vidya Mandira (AVM School), Rajajinagar, Bengaluru*
 
 - **.NET 10 SDK**: https://dotnet.microsoft.com/download
 - **Node.js 20.9 or newer (LTS)**: https://nodejs.org
-- SQL Server 2016 or newer (Express is fine), only when you connect the database later
+- SQL Server 2016 or newer (LocalDB or Express is fine) with the **AvmSchoolDb** database (see section 6)
 
 ## 2. Build and run
 
@@ -88,22 +88,21 @@ Student photo, first/middle/last name, date of birth, gender, blood group, natio
 
 You can change these paths in `appsettings.json` → `Storage`.
 
-## 6. Connecting SQL Server later
+## 6. SQL Server database
 
-The portal runs now **without a database**: data is saved as JSON files in `App_Data/`. When you're ready:
+The API is set to **SQL Server** (`Database:Provider` = `SqlServer` in `appsettings.json`). It connects to **AvmSchoolDb** on `(localdb)\MSSQLLocalDB` with your **Windows login** (`Integrated Security=True`), so no password is needed. All forms save there: Register → `Users` + `Students`, Contact → `ContactEnquiries`, Careers → `CareerApplications`, Gallery → `GalleryPhotos`, Page content → `SiteContent`.
 
-1. Run `database/01_create_database.sql` in SSMS (or `sqlcmd -S localhost -E -i database/01_create_database.sql`). It creates the **AvmSchoolDb** database with tables `Users`, `Students`, `GalleryPhotos`, `SiteContent`, `ContactEnquiries`, `CareerApplications` and the view `vw_StudentApplications`.
-2. In `backend/AvmSchool.Api/appsettings.json` set:
-   ```json
-   "Database": { "Provider": "SqlServer" },
-   "ConnectionStrings": {
-     "AvmSchoolDb": "Server=localhost;Database=AvmSchoolDb;Trusted_Connection=True;TrustServerCertificate=True"
-   }
-   ```
-   With SQL logins: `Server=YOURSERVER;Database=AvmSchoolDb;User Id=avm_app;Password=...;TrustServerCertificate=True`
-3. Restart the API. It creates the first admin account in SQL Server automatically.
+To set up a new database, run `database/01_create_database.sql` in SSMS (or `sqlcmd -S "(localdb)\MSSQLLocalDB" -E -i database/01_create_database.sql`). It creates the tables `Users`, `Students`, `GalleryPhotos`, `SiteContent`, `ContactEnquiries`, `CareerApplications` and the view `vw_StudentApplications`. On first start the API creates the admin account from `AdminSeed`.
 
-Data entered while running on JSON files is not copied to SQL Server automatically. Connect the database before real registrations start.
+**Using a SQL login instead** (for example on a server): replace `Integrated Security=True` in the connection string with `User ID=<login>`. Keep the password out of `appsettings.json` (that file is committed to git). On a PC, run this from `backend/AvmSchool.Api`:
+```powershell
+dotnet user-secrets set "Database:Password" "<password>"
+```
+This saves it in your Windows profile (`%APPDATA%\Microsoft\UserSecrets\`). On a server, set the environment variable `Database__Password`. If a SQL login has no password set, the API stops at startup and prints this command.
+
+To run without any database, set `Provider` to `Json` (data is saved as files in `App_Data/`). Data is not copied between the two automatically.
+
+The Register page has a **Fill test data** button in development mode (`npm run dev`) that fills every step with sample data. It is hidden in production builds.
 
 ## 7. Logo and images
 
