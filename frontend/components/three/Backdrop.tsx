@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
-const MountainScene = dynamic(() => import("./MountainScene"), { ssr: false });
+const GrowthScene = dynamic(() => import("./GrowthScene"), { ssr: false });
 const AmbientScene = dynamic(() => import("./AmbientScene"), { ssr: false });
 
 export const INTRO_KEY = "avm_intro_seen";
@@ -46,7 +46,7 @@ export default function Backdrop() {
   return (
     <div className="backdrop" aria-hidden="true">
       {pathname === "/" ? (
-        <MountainScene playIntro={playIntro} reducedMotion={reduced} />
+        <GrowthScene playIntro={playIntro} reducedMotion={reduced} />
       ) : (
         <AmbientScene reducedMotion={reduced} />
       )}

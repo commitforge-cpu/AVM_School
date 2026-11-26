@@ -1,6 +1,7 @@
 /* eslint-disable @next/next/no-img-element */
 import Link from "next/link";
 import Hero from "@/components/Hero";
+import Story from "@/components/Story";
 import { getContent } from "@/lib/content";
 
 export default async function HomePage() {
@@ -9,6 +10,7 @@ export default async function HomePage() {
   return (
     <>
       <Hero hero={home.hero} />
+      <Story story={home.story} />
 
       <div className="panel">
         <section className="section" id="our-school" aria-labelledby="our-school-h">

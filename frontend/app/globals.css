@@ -171,6 +171,31 @@ main { display: block; }
 @keyframes title-in { from { opacity: 0; letter-spacing: .12em; filter: blur(8px); } to { opacity: 1; letter-spacing: -0.02em; filter: blur(0); } }
 @keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
+/* home: captions that scroll over the 3D story, one chapter per screen */
+.story-beat { min-height: 100svh; display: flex; align-items: center; padding: 4rem 0; }
+.story-card {
+  max-width: 28rem; padding: 1.5rem 1.7rem 1.6rem;
+  background: rgba(8, 11, 32, .62); border: 1px solid var(--line); border-radius: var(--radius-m);
+  box-shadow: 0 20px 60px rgba(8, 11, 32, .45);
+}
+.story-step { display: block; font-family: var(--font-display); font-weight: 700; font-size: .9rem; letter-spacing: .14em; color: var(--marigold); }
+.story-card h2 { font-size: var(--t-xl); margin: .15rem 0 .5rem; }
+.story-card p { color: #d6d6ea; font-size: var(--t-md); }
+@media (max-width: 860px) {
+  .story-beat { align-items: flex-end; padding-bottom: 8svh; }
+  .story-card { max-width: none; }
+}
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .story-card { animation: story-card linear both; animation-timeline: view(); animation-range: cover; }
+  }
+}
+@keyframes story-card {
+  0% { opacity: 0; transform: translateY(48px); }
+  30%, 70% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translateY(-48px); }
+}
+
 /* ---------- page sections ---------- */
 .panel { background: rgba(13,18,48,.9); }
 .panel-deep { background: rgba(8,11,32,.94); }

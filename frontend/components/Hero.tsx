@@ -5,7 +5,7 @@ import { useEffect } from "react";
 import { INTRO_KEY } from "./three/Backdrop";
 import type { ContentMap } from "@/lib/defaultContent";
 
-/** Home page headline over the 3D mountain. Plays the letterbox intro once per visit. */
+/** Home page headline over the 3D story (birds and a falling seed). Plays the letterbox intro once per visit. */
 export default function Hero({ hero }: { hero: ContentMap["home"]["hero"] }) {
   useEffect(() => {
     const root = document.documentElement;
@@ -32,7 +32,7 @@ export default function Hero({ hero }: { hero: ContentMap["home"]["hero"] }) {
           </div>
         </div>
       </div>
-      <a className="scroll-cue" href="#our-school">Scroll to explore</a>
+      <a className="scroll-cue" href="#story">Scroll to explore</a>
     </section>
   );
 }

@@ -37,6 +37,17 @@ export const home = {
     secondaryCtaLabel: "See school life",
     secondaryCtaHref: "/school-life",
   },
+  // Captions for the 3D story under the headline (a seed falls, rain, sunlight, a tree grows, fruit).
+  // One chapter per screen as the visitor scrolls; the animation is timed for five.
+  story: {
+    chapters: [
+      { title: "A seed takes flight", text: "Every child who comes to us carries something precious, waiting to grow." },
+      { title: "Care, like rain", text: "Patient teachers and caring families give each child what they need, day after day." },
+      { title: "The light of learning", text: "Good lessons open young minds the way sunlight warms the soil." },
+      { title: "Rooted and rising", text: "Sound values become strong roots. Curiosity becomes branches that reach higher every year." },
+      { title: "Bearing fruit", text: "Our students grow into doctors, engineers, teachers and good citizens who give back." },
+    ],
+  },
   ourSchool: {
     heading: "Our school",
     paragraphs: [
