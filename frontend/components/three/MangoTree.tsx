@@ -1,489 +1,343 @@
 "use client";
 
 /**
- * A mango tree (Mangifera indica) that grows as the visitor scrolls, generated in code.
- * Like a real mango tree it has a short, stout trunk that forks low into a few thick limbs,
- * and a dense, rounded, evergreen dome of a crown made of rosettes of long glossy leaves at
- * the branch tips. Mangoes hang below the leaves in small bunches on long stalks.
+ * A mango tree (Mangifera indica) that grows as the visitor scrolls. The design follows a
+ * procedural Blender model of a mango tree, adapted to run live in the browser:
+ *  - a short trunk with a root flare and surface roots, forking into five big limbs;
+ *  - branches that split again and again inside a lumpy dome-shaped crown, each reaching part of
+ *    the way to the crown's edge, with side shoots filling the inside;
+ *  - tufts of long glossy leaves in a spiral at every twig tip (some copper-red new flush that
+ *    hangs limp), with pale midribs, lighter undersides and sunlight glowing through;
+ *  - mangoes hanging on long stalks, one to three each, from green to yellow-orange with a red
+ *    blush on the sunny side; and fallen leaves gathering underneath.
  *
- * Branches are grown by "space colonisation": points scattered through the dome-shaped crown
- * attract the growing tips, so the branches fill the crown the way a real tree's do.
- * Growth on screen happens in the shaders: every bark vertex knows the story time (u) at which
- * the growing tip reaches it, so the tree grows out from the trunk to the tips and thickens with
- * age, and leaves unfurl as the tips arrive. Scrolling back up reverses it.
+ * Sizes are taken from the model in metres and scaled to the island (S). Growth spreads out from
+ * the trunk to the twig tips, leaves open as the tips arrive, then the fruit sets and ripens.
  */
 
 import { useEffect, useMemo, useRef } from "react";
-import { useFrame } from "@react-three/fiber";
+import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { canvasTexture, easeOutBack, makeNoise, paintBy, pixelTexture, rng, smooth, useOwned, type Story } from "./sceneKit";
+import { surfaceY } from "./Island";
+import { SUN_DIR, easeOutBack, rng, smooth, sunAmount, useOwned, type Story } from "./sceneKit";
+import {
+  UP, barkTexture, branchGeometry, fillLeaves, growUniforms, growingBark, leafFrame, leafMaterials, leafSetGeometry,
+  perpBasis, rampColor, randUnit, updateLeafLight, type Branch, type LeafSpec,
+} from "./treeKit";
 
 export const TREE_BASE_Y = 0.05;
 /** Story time (u) at which the trunk starts growing out of the sprout. */
 export const TREE_START = 2.75;
-/** Story time by which the furthest branch tips have grown. */
+/** Story time by which the furthest twig tips have grown. */
 const TREE_GROWN = 3.9;
 
-const UP = new THREE.Vector3(0, 1, 0);
-const CROWN_CENTER = new THREE.Vector3(0, 3.05, 0);
-const CROWN_RADII = new THREE.Vector3(2.75, 1.55, 2.75); // wider than tall: a dome
-const CROWN_FLOOR = 1.5; // the crown's underside
+// The model, in metres
+const S = 0.53; // metres -> scene units (the crown just fits the island)
+const LEAF_SCALE = 1.7; // leaves and fruit drawn larger than life, as there are fewer of them than on a real tree
+const TRUNK_HEIGHT = 1.7;
+const TRUNK_RADIUS = 0.3;
+const CANOPY_RADIUS = 5.2;
+const CANOPY_HALF_HEIGHT = 3.3;
+const CANOPY_CENTER_Y = 4.9;
+const SCAFFOLD_LIMBS = 5;
+const BRANCH_LEVELS = 5; // one fewer than the offline model, to keep the leaf count real-time friendly
+const LEAVES_PER_TUFT: [number, number] = [11, 16];
+const LEAF_LENGTH: [number, number] = [0.2, 0.31];
+const YOUNG_FLUSH_CHANCE = 0.045;
+const FRUIT_CLUSTERS = 36;
+const MAXLEN = [3.0, 2.2, 1.6, 1.2, 0.9, 0.7, 0.55, 0.45];
 
-type TreeNode = { p: THREE.Vector3; parent: number; kids: number[]; r: number; path: number; birth: number; toTip: number };
-type Leaf = { pos: THREE.Vector3; dir: THREE.Vector3; roll: number; size: number; birth: number };
-type Mango = { pos: THREE.Vector3; stalk: number; birth: number; spin: number; lean: number };
+/** Scene-space crown, for shading leaves darker inside it. */
+export const CROWN_CENTER = new THREE.Vector3(0, CANOPY_CENTER_Y * S + TREE_BASE_Y, 0);
+export const CROWN_RADII = new THREE.Vector3(CANOPY_RADIUS * S, CANOPY_HALF_HEIGHT * S, CANOPY_RADIUS * S);
 
-// ---------------------------------------------------------------- the tree's shape (generated once)
+type Tuft = { pos: THREE.Vector3; dir: THREE.Vector3; kind: 0 | 1; path: number };
+type Mango = { attach: THREE.Vector3; hang: THREE.Vector3; stalk: number; size: number; spin: number; tilt: THREE.Euler; birth: number; skin: THREE.Color; blush: number };
+
+const LEAF_GREEN: [number, [number, number, number]][] = [[0, [0.012, 0.04, 0.009]], [0.45, [0.024, 0.068, 0.015]], [0.85, [0.045, 0.1, 0.02]], [1, [0.085, 0.125, 0.03]]];
+const LEAF_FLUSH: [number, [number, number, number]][] = [[0, [0.18, 0.035, 0.03]], [0.5, [0.26, 0.07, 0.04]], [1, [0.24, 0.13, 0.05]]];
+const MANGO_SKIN: [number, [number, number, number]][] = [[0, [0.09, 0.25, 0.03]], [0.5, [0.2, 0.36, 0.05]], [0.75, [0.55, 0.52, 0.07]], [0.92, [0.85, 0.52, 0.06]], [1, [0.88, 0.36, 0.05]]];
+const FALLEN: [number, [number, number, number]][] = [[0, [0.08, 0.045, 0.02]], [0.4, [0.16, 0.09, 0.035]], [0.75, [0.26, 0.17, 0.05]], [1, [0.12, 0.12, 0.04]]];
+const LEAF_BRIGHTNESS = 1.6; // the model's colours are tuned for a brighter renderer
+
+// ---------------------------------------------------------------- the tree (generated once, in metres, y up)
 
 const TREE = (() => {
-  const rand = rng(11);
-  const nodes: TreeNode[] = [];
-  const add = (p: THREE.Vector3, parent: number) => {
-    nodes.push({ p, parent, kids: [], r: 0, path: 0, birth: 0, toTip: 0 });
-    const i = nodes.length - 1;
-    if (parent >= 0) nodes[parent].kids.push(i);
-    return i;
-  };
+  const rand = rng(3);
+  const U = (a: number, b: number) => a + (b - a) * rand();
+  const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)];
+  const C = new THREE.Vector3(0, CANOPY_CENTER_Y, 0);
+  const RAD = new THREE.Vector3(CANOPY_RADIUS, CANOPY_HALF_HEIGHT, CANOPY_RADIUS);
+  const BUMPS = Array.from({ length: 12 }, () => ({ n: randUnit(rand), a: U(0.05, 0.15) }));
+  const lump = (d: THREE.Vector3) => BUMPS.reduce((f, b) => f + b.a * Math.max(0, d.dot(b.n)) ** 6, 0.94);
 
-  // a short, stout trunk with a slight lean
-  const TRUNK_STEPS = 6;
-  const base = new THREE.Vector3(0, TREE_BASE_Y - 0.12, 0);
-  const top = new THREE.Vector3(0.07, 1.3, 0.05);
-  let fork = add(base, -1);
-  for (let i = 1; i <= TRUNK_STEPS; i++) {
-    const t = i / TRUNK_STEPS;
-    fork = add(new THREE.Vector3().lerpVectors(base, top, t).add(new THREE.Vector3(Math.sin(t * 3.2) * 0.04, 0, 0)), fork);
-  }
-  // it forks low into a few thick limbs spreading outwards
-  const LIMBS = 5;
-  for (let k = 0; k < LIMBS; k++) {
-    const az = (k * Math.PI * 2) / LIMBS + (rand() - 0.5) * 0.7;
-    const tilt = 0.7 + rand() * 0.35;
-    const dir = new THREE.Vector3(Math.sin(tilt) * Math.cos(az), Math.cos(tilt), Math.sin(tilt) * Math.sin(az));
-    let n = fork;
-    for (let s = 0; s < 3; s++) n = add(nodes[n].p.clone().addScaledVector(dir, 0.22), n);
-  }
-
-  // points through the crown that pull the growing tips towards them (more near its surface)
-  const attractors: THREE.Vector3[] = [];
-  while (attractors.length < 1100) {
-    const v = new THREE.Vector3(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1);
-    const len = v.length();
-    if (len > 1 || (len < 0.45 && rand() < 0.75)) continue;
-    const p = v.multiply(CROWN_RADII).add(CROWN_CENTER);
-    if (p.y < CROWN_FLOOR + rand() * 0.25) continue;
-    attractors.push(p);
-  }
-
-  const STEP = 0.17, INFLUENCE = 1.5, KILL = 0.3;
-  const alive = attractors.map(() => true);
-  const nearest = new Int32Array(attractors.length).fill(-1);
-  const nearestD = new Float32Array(attractors.length).fill(Infinity);
-  const update = (list: number[]) => {
-    attractors.forEach((a, k) => {
-      if (!alive[k]) return;
-      for (const i of list) {
-        const d = a.distanceTo(nodes[i].p);
-        if (d < KILL) { alive[k] = false; return; }
-        if (d < nearestD[k]) { nearestD[k] = d; nearest[k] = i; }
-      }
-    });
-  };
-  update(nodes.map((_, i) => i));
-  for (let iter = 0; iter < 140; iter++) {
-    const pull = new Map<number, THREE.Vector3>();
-    attractors.forEach((a, k) => {
-      if (!alive[k] || nearest[k] < 0 || nearestD[k] > INFLUENCE) return;
-      const i = nearest[k];
-      const v = a.clone().sub(nodes[i].p).normalize();
-      pull.set(i, (pull.get(i) ?? new THREE.Vector3()).add(v));
-    });
-    if (!pull.size) break;
-    const added: number[] = [];
-    pull.forEach((sum, i) => {
-      const dir = sum.normalize().add(new THREE.Vector3((rand() - 0.5) * 0.3, 0.1, (rand() - 0.5) * 0.3)).normalize();
-      const p = nodes[i].p.clone().addScaledVector(dir, STEP);
-      if (nodes[i].kids.some((c) => nodes[c].p.distanceToSquared(p) < (STEP * 0.5) ** 2)) return; // don't grow the same twig twice
-      added.push(add(p, i));
-    });
-    if (!added.length) break;
-    update(added);
-  }
-
-  // soften the kinks along each branch (branch points and tips stay put)
-  for (let pass = 0; pass < 2; pass++) {
-    const next = nodes.map((n) => n.p.clone());
-    nodes.forEach((n, i) => {
-      if (i <= TRUNK_STEPS || n.parent < 0 || n.kids.length !== 1) return;
-      next[i].multiplyScalar(0.5).addScaledVector(nodes[n.parent].p, 0.25).addScaledVector(nodes[n.kids[0]].p, 0.25);
-    });
-    nodes.forEach((n, i) => n.p.copy(next[i]));
-  }
-
-  // thickness: a branch is as thick as the twigs it carries ("pipe model"); the trunk flares at its foot
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const n = nodes[i];
-    n.r = n.kids.length ? Math.pow(n.kids.reduce((s, c) => s + Math.pow(nodes[c].r, 2.3), 0), 1 / 2.3) : 0.016;
-    n.toTip = n.kids.length ? 1 + Math.min(...n.kids.map((c) => nodes[c].toTip)) : 0;
-  }
-  for (let i = 0; i <= TRUNK_STEPS; i++) nodes[i].r *= 1 + 0.9 * Math.pow(1 - i / TRUNK_STEPS, 5);
-
-  // when each point is reached: the tree grows out from the trunk to the tips
-  let maxPath = 0;
-  nodes.forEach((n) => {
-    n.path = n.parent < 0 ? 0 : nodes[n.parent].path + n.p.distanceTo(nodes[n.parent].p);
-    maxPath = Math.max(maxPath, n.path);
-  });
-  nodes.forEach((n) => (n.birth = TREE_START + (TREE_GROWN - TREE_START) * Math.pow(n.path / maxPath, 0.85)));
-
-  // limbs to draw: each follows its thickest child; side branches start a limb of their own
-  const chains: number[][] = [];
-  const pending: [number, number][] = [];
-  const walk = (start: number, from: number) => {
-    const chain = from < 0 ? [] : [from];
-    let i = start;
-    for (;;) {
-      chain.push(i);
-      const kids = nodes[i].kids;
-      if (!kids.length) break;
-      const main = kids.reduce((a, b) => (nodes[a].r >= nodes[b].r ? a : b));
-      kids.forEach((k) => k !== main && pending.push([k, i]));
-      i = main;
+  /** How far from p, going along d, until the (lumpy) crown edge. */
+  function exitDist(p: THREE.Vector3, d: THREE.Vector3) {
+    const q = p.clone().sub(C).divide(RAD);
+    const e = d.clone().divide(RAD);
+    const a = e.dot(e), b = 2 * q.dot(e), c = q.dot(q) - 1;
+    const disc = b * b - 4 * a * c;
+    if (disc < 0) return 0.1;
+    let t = Math.max(0, (-b + Math.sqrt(disc)) / (2 * a));
+    const dv = p.clone().addScaledVector(d, t).sub(C);
+    if (dv.length() > 1e-6) {
+      const dn = dv.clone().normalize();
+      t += (lump(dn) - 1) * dv.length() * Math.max(0.25, d.dot(dn));
     }
-    chains.push(chain);
-  };
-  walk(0, -1);
-  while (pending.length) {
-    const [k, from] = pending.pop()!;
-    walk(k, from);
+    return Math.max(0.1, t);
   }
 
-  // leaves: rosettes at every tip and along the outer twigs, plus a few large clusters filling the
-  // inside of the crown, so it reads as one dense, solid mass like a real mango tree
-  const rel = (p: THREE.Vector3) => p.clone().sub(CROWN_CENTER).divide(CROWN_RADII);
-  const leaves: Leaf[] = [];
-  nodes.forEach((n) => {
-    if (n.toTip > 8 || n.p.y < CROWN_FLOOR - 0.2) return;
-    const inner = n.toTip > 3;
-    if (inner && rand() > 0.35) return;
-    const copies = n.toTip === 0 ? 2 : 1;
-    for (let c = 0; c < copies; c++) {
-      if (!inner && n.toTip > 0 && rand() > 0.85) continue;
-      const dir = rel(n.p).normalize()
-        .add(new THREE.Vector3(rand() - 0.5, rand() - 0.3, rand() - 0.5).multiplyScalar(c ? 1.6 : 0.9))
+  const raw: { pts: THREE.Vector3[]; radii: number[]; start: number; level: number }[] = [];
+  const tufts: Tuft[] = [];
+  const pathLen = (pts: THREE.Vector3[], start: number) => {
+    const out = [start];
+    for (let i = 1; i < pts.length; i++) out.push(out[i - 1] + pts[i].distanceTo(pts[i - 1]));
+    return out;
+  };
+
+  /** A wobbling, drooping path of length L from p0 along d0. */
+  function path(p0: THREE.Vector3, d0: THREE.Vector3, L: number, r0: number, r1: number, wobble: number, droop: number) {
+    const n = Math.max(3, Math.min(10, Math.floor(L / 0.2) + 2));
+    const pts = [p0.clone()];
+    const radii = [r0];
+    const d = d0.clone();
+    const p = p0.clone();
+    for (let i = 1; i <= n; i++) {
+      d.addScaledVector(randUnit(rand), wobble).add(new THREE.Vector3(0, -droop, 0)).normalize();
+      p.addScaledVector(d, L / n);
+      pts.push(p.clone());
+      radii.push(r0 + ((r1 - r0) * i) / n);
+    }
+    return { pts, radii, dEnd: d.clone() };
+  }
+
+  function grow(p: THREE.Vector3, d: THREE.Vector3, r: number, level: number, startPath: number) {
+    const t = exitDist(p, d);
+    const last = level >= BRANCH_LEVELS;
+    const frac = last ? U(0.75, 1) : U(0.32, 0.48);
+    const L = Math.min(Math.max(0.15, t * frac), MAXLEN[Math.min(level, MAXLEN.length - 1)]);
+    const rEnd = Math.max(0.004, r * U(0.7, 0.82));
+    const { pts, radii, dEnd } = path(p, d, L, r, rEnd, 0.1 + 0.03 * level, 0.018 * level);
+    raw.push({ pts, radii, start: startPath, level });
+    const lens = pathLen(pts, startPath);
+    const end = pts[pts.length - 1];
+    const endPath = lens[lens.length - 1];
+    if (last) {
+      tufts.push({ pos: end, dir: dEnd, kind: 0, path: endPath });
+      return;
+    }
+    if (level >= BRANCH_LEVELS - 1) tufts.push({ pos: end, dir: dEnd, kind: 1, path: endPath });
+    const k = level < 2 ? pick([2, 3, 3, 3, 4]) : pick([2, 2, 3, 3, 4]);
+    const [u, v] = perpBasis(dEnd);
+    const phi0 = rand() * Math.PI * 2;
+    const rc = rEnd * Math.pow(1 / k, 1 / 2.4);
+    const oy = 1.2 + (C.y - 1.2) * Math.min(1, level / BRANCH_LEVELS) * 0.9; // outer shoots spread out and down
+    const radial = end.clone().sub(new THREE.Vector3(0, oy, 0)).normalize();
+    for (let i = 0; i < k; i++) {
+      const phi = phi0 + (Math.PI * 2 * i) / k + U(-0.4, 0.4);
+      const ang = THREE.MathUtils.degToRad(U(25, 50));
+      const nd = dEnd.clone().multiplyScalar(Math.cos(ang))
+        .add(u.clone().multiplyScalar(Math.cos(phi)).addScaledVector(v, Math.sin(phi)).multiplyScalar(Math.sin(ang)))
+        .addScaledVector(radial, 0.45)
         .normalize();
-      const size = inner ? 0.75 + rand() * 0.3 : n.toTip === 0 ? 0.58 + rand() * 0.2 : 0.48 + rand() * 0.18;
-      leaves.push({ pos: n.p.clone(), dir, roll: rand() * Math.PI * 2, size, birth: n.birth + 0.03 });
+      grow(end.clone().addScaledVector(dEnd, -rc * 0.6), nd, rc * U(0.9, 1.05), level + 1, endPath);
     }
-  });
+    // a side shoot along the branch fills the inner and lower crown
+    if (level <= BRANCH_LEVELS - 3 && rand() < 0.7) {
+      const idx = 1 + Math.floor(rand() * (pts.length - 2));
+      const [su, sv] = perpBasis(d);
+      const phi = rand() * Math.PI * 2;
+      const ang = THREE.MathUtils.degToRad(U(45, 70));
+      const nd = d.clone().multiplyScalar(Math.cos(ang))
+        .add(su.clone().multiplyScalar(Math.cos(phi)).addScaledVector(sv, Math.sin(phi)).multiplyScalar(Math.sin(ang)))
+        .addScaledVector(radial, 0.3)
+        .normalize();
+      grow(pts[idx].clone(), nd, radii[idx] * 0.45, level + 2, lens[idx]);
+    }
+  }
 
-  // mangoes: small bunches hanging on long stalks from tips on the lower, outer part of the crown
-  const candidates = nodes
-    .map((n, i) => ({ i, q: rel(n.p) }))
-    .filter(({ i, q }) => nodes[i].toTip === 0 && q.y < 0.15 && Math.hypot(q.x, q.z) > 0.55)
-    .sort((a, b) => Math.hypot(b.q.x, b.q.z) - b.q.y * 0.5 - (Math.hypot(a.q.x, a.q.z) - a.q.y * 0.5));
-  const bunches: THREE.Vector3[] = [];
-  for (const c of candidates) {
-    const p = nodes[c.i].p;
-    if (bunches.every((b) => b.distanceTo(p) > 0.75)) bunches.push(p);
-    if (bunches.length >= 13) break;
+  // trunk with a root flare
+  const trunkPts: THREE.Vector3[] = [];
+  const trunkR: number[] = [];
+  for (let i = 0; i <= 10; i++) {
+    const t = i / 10;
+    const y = -0.25 + (TRUNK_HEIGHT + 0.4) * t;
+    trunkPts.push(new THREE.Vector3(0.07 * Math.sin(t * 2.2), y, 0.04 * t * t));
+    trunkR.push(TRUNK_RADIUS * (1 + 0.6 * Math.exp(-Math.max(y, 0) / 0.22)) * (1 - 0.15 * t));
+  }
+  raw.push({ pts: trunkPts, radii: trunkR, start: 0, level: -1 });
+  const trunkLens = pathLen(trunkPts, 0);
+  const trunkPathAt = (y: number) => trunkLens[Math.max(0, Math.min(10, Math.round(((y + 0.25) / (TRUNK_HEIGHT + 0.4)) * 10)))];
+  // surface roots
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI * 2 * i) / 6 + U(-0.3, 0.3);
+    const dd = new THREE.Vector3(Math.cos(a), -0.25, Math.sin(a)).normalize();
+    const { pts, radii } = path(new THREE.Vector3(0, 0.12, 0), dd, U(0.9, 1.6), TRUNK_RADIUS * 0.45, 0.02, 0.06, 0.04);
+    raw.push({ pts, radii, start: 0.1, level: -1 });
+  }
+  // scaffold limbs
+  const phi0 = rand() * Math.PI * 2;
+  for (let i = 0; i < SCAFFOLD_LIMBS; i++) {
+    const phi = phi0 + (Math.PI * 2 * i) / SCAFFOLD_LIMBS + U(-0.3, 0.3);
+    const elev = THREE.MathUtils.degToRad(i === 0 ? 75 : U(28, 52));
+    const d = new THREE.Vector3(Math.cos(phi) * Math.cos(elev), Math.sin(elev), Math.sin(phi) * Math.cos(elev));
+    const hy = TRUNK_HEIGHT - U(0, 0.4);
+    const start = new THREE.Vector3(0.07 * Math.sin((2.2 * hy) / TRUNK_HEIGHT), hy, 0).addScaledVector(d, 0.05);
+    grow(start, d, TRUNK_RADIUS * U(0.55, 0.68), 0, trunkPathAt(hy));
+  }
+
+  // ---- to scene units, with growth times: the tree grows out from the trunk to the tips
+  const maxPath = Math.max(...tufts.map((t) => t.path));
+  const birthAt = (pathM: number) => TREE_START + (TREE_GROWN - TREE_START) * Math.pow(Math.min(1, pathM / maxPath), 0.85);
+  const toScene = (p: THREE.Vector3) => p.clone().multiplyScalar(S).add(new THREE.Vector3(0, TREE_BASE_Y, 0));
+  const white = new THREE.Color(1, 1, 1);
+  const branches: Branch[] = raw.map((b) => ({
+    pts: b.pts.map(toScene),
+    radii: b.radii.map((r) => r * S),
+    births: pathLen(b.pts, b.start).map(birthAt),
+    tint: white,
+  }));
+
+  // ---- leaves: a spiral tuft at every twig tip, smaller tufts a little further in
+  const leaves: LeafSpec[] = [];
+  const col = new THREE.Color();
+  for (const tf of tufts) {
+    const young = tf.kind === 0 && rand() < YOUNG_FLUSH_CHANCE;
+    const n = tf.kind === 0 ? Math.round(U(...LEAVES_PER_TUFT)) : Math.round(U(5, 8));
+    const [u, v] = perpBasis(tf.dir);
+    const tint = rand();
+    const birth = birthAt(tf.path) + 0.03;
+    for (let i = 0; i < n; i++) {
+      const phi = i * 2.39996 + U(-0.3, 0.3); // golden-angle spiral
+      const ang = THREE.MathUtils.degToRad(tf.kind === 0 ? U(30, 80) : U(60, 105));
+      const dl = tf.dir.clone().multiplyScalar(Math.cos(ang))
+        .add(u.clone().multiplyScalar(Math.cos(phi)).addScaledVector(v, Math.sin(phi)).multiplyScalar(Math.sin(ang)))
+        .add(new THREE.Vector3(0, young ? -1.6 : -0.25, 0)) // young flush hangs limp
+        .normalize();
+      const { side, nrm } = leafFrame(dl, rand);
+      const L = U(...LEAF_LENGTH) * (young ? 0.85 : 1) * (tf.kind ? 1.08 : 1) * S * LEAF_SCALE;
+      const base = tf.pos.clone().addScaledVector(tf.dir, U(-0.07, 0.02)).addScaledVector(dl, 0.035);
+      const shade = (tint + rand()) / 2;
+      rampColor(shade, young ? LEAF_FLUSH : LEAF_GREEN, col).multiplyScalar(LEAF_BRIGHTNESS);
+      if (tf.kind) col.multiply(new THREE.Color(0.75, 0.79, 0.71)); // older leaves further in are duller
+      leaves.push({
+        pos: toScene(base), dir: dl, side, nrm,
+        length: L, width: L * U(0.19, 0.25), depth: L * U(0.5, 1.6),
+        color: col.clone(), birth: birth + i * 0.004,
+      });
+    }
+  }
+  // shuffle, so drawing only the first part of the list (on phones) thins the crown evenly
+  for (let i = leaves.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [leaves[i], leaves[j]] = [leaves[j], leaves[i]];
+  }
+
+  // ---- mangoes: on long stalks from twig tips in the middle and outer crown, 1 to 3 each
+  const candidates = tufts.filter((t) => t.kind === 0 && t.pos.y > 2.0 && t.pos.y < C.y + 0.6 && Math.hypot(t.pos.x, t.pos.z) > 2.0);
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
   }
   const mangoes: Mango[] = [];
-  bunches.forEach((p, b) => {
-    const count = 2 + Math.floor(rand() * 2.2);
-    for (let k = 0; k < count; k++) {
-      mangoes.push({ pos: p.clone(), stalk: 0.28 + rand() * 0.2, birth: 4.0 + (b / bunches.length) * 0.2 + k * 0.02, spin: rand() * Math.PI * 2, lean: (k - (count - 1) / 2) * 0.32 });
+  candidates.slice(0, FRUIT_CLUSTERS).forEach((tf, ci) => {
+    const stalk = U(0.22, 0.55) * S * 1.3;
+    const k = rand() < 0.55 ? 1 : rand() < 0.67 ? 2 : 3;
+    const a0 = rand() * Math.PI * 2;
+    const hang = tf.dir.clone().multiplyScalar(0.25).add(new THREE.Vector3(0, -1, 0)).normalize();
+    for (let j = 0; j < k; j++) {
+      const a = a0 + (Math.PI * 2 * j) / k;
+      const r = 0.4 + 0.6 * rand(); // mostly ripening (some still green)
+      const tilt = k > 1 ? 0.25 : 0.08;
+      mangoes.push({
+        attach: toScene(tf.pos),
+        hang,
+        stalk: stalk + (k > 1 ? 0.03 + j * 0.015 : 0),
+        size: U(0.11, 0.15) * S * LEAF_SCALE * 1.5, // a little larger than life so they read among the leaves
+        spin: rand() * Math.PI * 2,
+        tilt: new THREE.Euler(Math.sin(a) * tilt + U(-0.08, 0.08), 0, -Math.cos(a) * tilt + U(-0.08, 0.08)),
+        birth: 4.0 + (ci / FRUIT_CLUSTERS) * 0.2 + j * 0.02,
+        skin: rampColor(r, MANGO_SKIN, new THREE.Color()).multiplyScalar(1.25),
+        blush: THREE.MathUtils.clamp((r - 0.45) / 0.5, 0, 1) * 0.85,
+      });
     }
   });
 
-  // two spots on sturdy branches, on the camera's side of the crown, where parakeets land at the end
-  const perchable = nodes
-    .map((n, i) => ({ i, q: rel(n.p) }))
-    .filter(({ i, q }) => nodes[i].r > 0.035 && nodes[i].r < 0.09 && q.y > -0.6 && q.y < 0.2 && Math.hypot(q.x, q.z) > 0.35)
-    .sort((a, b) => nodes[b.i].p.z + 0.5 * nodes[b.i].p.x - (nodes[a.i].p.z + 0.5 * nodes[a.i].p.x));
+  // ---- fallen leaves gathering under the tree once it is grown
+  const litter: LeafSpec[] = [];
+  for (let i = 0; i < 160; i++) {
+    const rr = CANOPY_RADIUS * 0.95 * Math.sqrt(rand()) * S;
+    const a = rand() * Math.PI * 2;
+    const x = rr * Math.cos(a), z = rr * Math.sin(a);
+    if (Math.hypot(x, z) < 0.25) continue;
+    const h = rand() * Math.PI * 2;
+    const dl = new THREE.Vector3(Math.cos(h), U(-0.05, 0.05), Math.sin(h)).normalize();
+    const { side, nrm } = leafFrame(dl, rand);
+    const L = U(...LEAF_LENGTH) * S * LEAF_SCALE;
+    litter.push({
+      pos: new THREE.Vector3(x, surfaceY(x, z) + 0.012, z), dir: dl, side, nrm,
+      length: L, width: L * 0.22, depth: L * (rand() < 0.5 ? -1 : 1) * U(0.1, 0.35), // curled up or down, never flat (keeps normals valid)
+      color: rampColor(rand(), FALLEN, new THREE.Color()).multiplyScalar(1.4),
+      birth: 4.2 + rand() * 0.3,
+    });
+  }
+
+  // ---- two spots on sturdy branches, on the camera's side of the crown, where parakeets land
   const perches: { pos: THREE.Vector3; yaw: number }[] = [];
-  for (const c of perchable) {
-    const n = nodes[c.i];
-    const pos = n.p.clone().addScaledVector(UP, n.r + 0.015);
-    if (perches.every((q) => q.pos.distanceTo(pos) > 1.2)) perches.push({ pos, yaw: Math.atan2(-pos.z, pos.x) });
+  const sturdy = branches
+    .flatMap((b) => b.pts.map((p, i) => ({ p, r: b.radii[i] })))
+    .filter(({ p, r }) => r > 0.018 && r < 0.05 && p.y > CROWN_CENTER.y - CROWN_RADII.y * 0.55 && p.y < CROWN_CENTER.y && p.z > 0.6 && Math.hypot(p.x, p.z) > 0.9)
+    .sort((a, b) => b.p.z + 0.4 * b.p.x - (a.p.z + 0.4 * a.p.x));
+  for (const s of sturdy) {
+    const pos = s.p.clone().addScaledVector(UP, s.r + 0.015);
+    if (perches.every((q) => q.pos.distanceTo(pos) > 1.1)) perches.push({ pos, yaw: Math.atan2(-pos.z, pos.x) });
     if (perches.length === 2) break;
   }
-  while (perches.length < 2) perches.push({ pos: nodes[TRUNK_STEPS + 3 + perches.length * 3].p.clone().addScaledVector(UP, 0.12), yaw: 0 });
+  while (perches.length < 2) perches.push({ pos: toScene(new THREE.Vector3(perches.length ? -1.5 : 1.5, 3.0, 1.2)), yaw: 0 });
 
-  return { nodes, chains, leaves, mangoes, perches };
+  return { branches, leaves, mangoes, litter, perches };
 })();
 
 export const PERCHES = TREE.perches;
 
-// ---------------------------------------------------------------- geometry
+// ---------------------------------------------------------------- the fruit
 
-/** All the limbs as one mesh. Each vertex also stores its centre line point and when it grows. */
-function limbGeometry() {
-  const { nodes, chains } = TREE;
-  const radialFor = (r: number) => (r > 0.1 ? 14 : r > 0.045 ? 9 : r > 0.022 ? 6 : 4);
-  let verts = 0;
-  let tris = 0;
-  for (const ch of chains) {
-    const R = radialFor(nodes[ch[Math.min(1, ch.length - 1)]].r);
-    verts += ch.length * (R + 1);
-    tris += (ch.length - 1) * R * 2;
-  }
-  const position = new Float32Array(verts * 3);
-  const normal = new Float32Array(verts * 3);
-  const uv = new Float32Array(verts * 2);
-  const color = new Float32Array(verts * 3);
-  const center = new Float32Array(verts * 3);
-  const birth = new Float32Array(verts);
-  const indices = new Uint32Array(tris * 3);
-  const twig = new THREE.Color("#9a9a78");
-  const old = new THREE.Color("#ffffff");
-  const c = new THREE.Color();
-  const T = new THREE.Vector3(), N = new THREE.Vector3(), B = new THREE.Vector3(), off = new THREE.Vector3();
-  let v = 0;
-  let ix = 0;
-
-  for (const ch of chains) {
-    const n = ch.length - 1;
-    const R = radialFor(nodes[ch[Math.min(1, n)]].r);
-    const first = v;
-    let arc = 0;
-    for (let i = 0; i <= n; i++) {
-      const node = nodes[ch[i]];
-      const p = node.p;
-      // a side branch starts inside its parent with its own thickness, not the parent's
-      let r = i === 0 && n > 0 ? nodes[ch[1]].r : node.r;
-      if (i === n && !node.kids.length) r *= 0.5; // tapered tip
-      T.subVectors(nodes[ch[Math.min(i + 1, n)]].p, nodes[ch[Math.max(i - 1, 0)]].p).normalize();
-      if (i === 0) N.copy(Math.abs(T.y) < 0.9 ? UP : new THREE.Vector3(1, 0, 0)).cross(T).normalize();
-      else {
-        N.addScaledVector(T, -T.dot(N)).normalize(); // parallel transport: no twisting
-        arc += p.distanceTo(nodes[ch[i - 1]].p);
-      }
-      B.crossVectors(T, N);
-      const wraps = Math.max(1, Math.round((2 * Math.PI * r) / 0.3));
-      c.copy(old).lerp(twig, 1 - smooth(0.015, 0.05, r)); // young twigs are greener
-      for (let j = 0; j <= R; j++) {
-        const a = (j / R) * Math.PI * 2;
-        off.copy(N).multiplyScalar(Math.cos(a)).addScaledVector(B, Math.sin(a));
-        position.set([p.x + off.x * r, p.y + off.y * r, p.z + off.z * r], v * 3);
-        normal.set([off.x, off.y, off.z], v * 3);
-        uv.set([(j / R) * wraps, arc / 0.5], v * 2);
-        color.set([c.r, c.g, c.b], v * 3);
-        center.set([p.x, p.y, p.z], v * 3);
-        birth[v] = i === 0 && n > 0 ? nodes[ch[0]].birth : node.birth;
-        v++;
-      }
-    }
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < R; j++) {
-        const a = first + i * (R + 1) + j;
-        const b = a + R + 1;
-        indices.set([a, a + 1, b, a + 1, b + 1, b], ix);
-        ix += 6;
-      }
-    }
-  }
-
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  g.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
-  g.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-  g.setAttribute("color", new THREE.BufferAttribute(color, 3));
-  g.setAttribute("aCenter", new THREE.BufferAttribute(center, 3));
-  g.setAttribute("aBirth", new THREE.BufferAttribute(birth, 1));
-  g.setIndex(new THREE.BufferAttribute(indices, 1));
-  return g;
-}
-
-/** A mango: oblong, broad at the shoulders, narrowing to a small beak at the bottom. */
+/** A mango, 1 long from its stalk (origin) downwards: plump shoulders tapering to the "beak". */
 function mangoGeometry() {
-  const g = new THREE.SphereGeometry(1, 24, 18);
+  const g = new THREE.SphereGeometry(1, 28, 18);
   const pos = g.attributes.position as THREE.BufferAttribute;
+  const side = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) {
-    let x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    const w = 1 + 0.12 * y; // broader shoulders
-    x = x * w + 0.16 * (1 - y * y); // fuller on one side
-    if (y < -0.5) x -= 0.4 * (-y - 0.5) ** 1.5; // the "beak"
-    pos.setXYZ(i, x * 0.07, y * 0.1, z * 0.062 * w);
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const s = (1 - y) / 2; // 0 at the stalk end, 1 at the tip
+    const taper = 1 - 0.3 * s ** 2.2 + 0.06 * Math.sin(Math.PI * s);
+    let ny = y * 0.5 - 0.5;
+    if (y > 0.9) ny -= (0.03 * (y - 0.9)) / 0.1; // stalk cavity
+    const nx = x * 0.36 * taper + 0.11 * s ** 2.5; // the beak
+    pos.setXYZ(i, nx, ny, z * 0.31 * taper);
+    side[i] = smooth(-0.05, 0.3, nx + 0.25 * (ny + 0.5)); // the sun-facing shoulder that blushes
   }
   g.computeVertexNormals();
-  const stalk = new THREE.Color("#6f9a34");
-  const gold = new THREE.Color("#f1b32c");
-  const blush = new THREE.Color("#d9532a");
-  paintBy(g, (p, out) => {
-    const y = p.y / 0.1;
-    const x = p.x / 0.08;
-    out.copy(gold).lerp(blush, THREE.MathUtils.clamp(y * 0.8 + x * 0.5 - 0.1, 0, 1) * 0.75); // blush on the sunny shoulder
-    if (y > 0.85) out.lerp(stalk, (y - 0.85) / 0.15);
-  });
-  g.translate(0, -0.1, 0); // hang from the top
+  g.setAttribute("aSide", new THREE.BufferAttribute(side, 1));
   return g;
 }
 
-// ---------------------------------------------------------------- textures
-
-function barkTexture() {
-  const n = makeNoise(5);
-  const rand = rng(5);
-  return pixelTexture(128, 256, (u, v, px) => {
-    // rough, dark grey-brown bark with long fissures and scaly plates
-    const plates = n.fbm(u * 6, v * 3, 4, 3);
-    const fissure = Math.abs(n.fbm(u * 10 + 3, v * 1.5, 3, 10) - 0.5);
-    const base = 70 + plates * 55;
-    const dark = fissure < 0.03 ? 0.35 : fissure < 0.06 ? 0.7 : 1;
-    px[0] = base * 1.02 * dark;
-    px[1] = base * 0.9 * dark;
-    px[2] = base * 0.8 * dark;
-  }, true, (ctx) => {
-    for (let i = 0; i < 220; i++) { // lichen and dust
-      ctx.fillStyle = rand() < 0.5 ? `rgba(150,155,130,${rand() * 0.16})` : `rgba(60,50,42,${rand() * 0.3})`;
-      ctx.fillRect(rand() * 128, rand() * 256, 1 + rand() * 4, 1 + rand() * 3);
-    }
-  });
-}
-
-/** A rosette of mango leaves seen from outside: long, glossy, pointed leaves fanning from a tip. */
-function leafTexture() {
-  const rand = rng(23);
-  return canvasTexture(512, 512, (ctx) => {
-    const leaf = (angle: number, len: number, width: number, shade: number, droop: number) => {
-      ctx.save();
-      ctx.translate(256, 256);
-      ctx.rotate(angle);
-      const w = width;
-      const grad = ctx.createLinearGradient(0, 0, 0, -len);
-      grad.addColorStop(0, `rgb(${24 * shade},${58 * shade},${24 * shade})`);
-      grad.addColorStop(0.5, `rgb(${34 * shade},${82 * shade},${32 * shade})`);
-      grad.addColorStop(1, `rgb(${46 * shade},${98 * shade},${38 * shade})`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(0, -len * 0.08);
-      ctx.bezierCurveTo(w + droop, -len * 0.3, w * 0.9 + droop * 1.5, -len * 0.75, droop * 2, -len);
-      ctx.bezierCurveTo(-w * 0.9 + droop * 1.5, -len * 0.75, -w + droop, -len * 0.3, 0, -len * 0.08);
-      ctx.fill();
-      // glossy sheen on one half and a pale midrib
-      ctx.fillStyle = "rgba(200,235,170,0.09)";
-      ctx.beginPath();
-      ctx.moveTo(0, -len * 0.08);
-      ctx.bezierCurveTo(w + droop, -len * 0.3, w * 0.9 + droop * 1.5, -len * 0.75, droop * 2, -len);
-      ctx.quadraticCurveTo(droop, -len * 0.5, 0, -len * 0.08);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(205,225,160,0.55)";
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.moveTo(0, -len * 0.08);
-      ctx.quadraticCurveTo(droop, -len * 0.5, droop * 2, -len * 0.98);
-      ctx.stroke();
-      ctx.strokeStyle = "rgba(190,220,150,0.18)";
-      ctx.lineWidth = 0.8;
-      for (let k = 1; k < 12; k++) {
-        const t = k / 12;
-        const y = -len * (0.1 + t * 0.85);
-        const half = w * 0.85 * Math.sin(t * Math.PI) ** 0.7;
-        const x0 = droop * 2 * t * t;
-        ctx.beginPath();
-        ctx.moveTo(x0, y);
-        ctx.lineTo(x0 + half, y - len * 0.05);
-        ctx.moveTo(x0, y);
-        ctx.lineTo(x0 - half, y - len * 0.05);
-        ctx.stroke();
-      }
-      ctx.restore();
-    };
-    // a back layer of darker leaves, then a front layer, so the rosette has depth
-    for (const [count, shade, len] of [[9, 0.72, 225], [8, 1.0, 205]] as const) {
-      const turn = rand() * Math.PI;
-      for (let k = 0; k < count; k++) {
-        const a = turn + (k / count) * Math.PI * 2 + (rand() - 0.5) * 0.35;
-        const l = len * (0.8 + rand() * 0.2);
-        leaf(a, l, l * (0.19 + rand() * 0.05), shade * (0.85 + rand() * 0.3), (rand() - 0.5) * 30);
-      }
-    }
-    ctx.fillStyle = "#4a3a24"; // the twig tip the leaves grow from
-    ctx.beginPath();
-    ctx.arc(256, 256, 7, 0, Math.PI * 2);
-    ctx.fill();
-  });
-}
-
-// ---------------------------------------------------------------- shaders
-
-type GrowUniforms = { uGrow: { value: number }; uTime: { value: number }; uCenter: { value: THREE.Vector3 }; uRadii: { value: THREE.Vector3 } };
-
-const DECLARE = /* glsl */ `#include <common>
-attribute float aBirth;
-uniform float uGrow;
-uniform float uTime;
-uniform vec3 uCenter;
-uniform vec3 uRadii;`;
-
-/** Branches grow out from the trunk to the tips and thicken with age. */
-function growingBark<M extends THREE.Material>(mat: M, uniforms: GrowUniforms, key: string): M {
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", `${DECLARE}\nattribute vec3 aCenter;`)
-      .replace(
-        "#include <begin_vertex>",
-        /* glsl */ `#include <begin_vertex>
-float tipGrow = smoothstep(aBirth, aBirth + 0.05, uGrow);
-float girth = mix(0.35, 1.0, smoothstep(aBirth, aBirth + 0.8, uGrow));
-transformed = aCenter + (transformed - aCenter) * tipGrow * girth;`,
-      );
-  };
-  mat.customProgramCacheKey = () => key;
-  return mat;
-}
-
-/**
- * Leaves unfurl from their twig, flutter in the breeze, and are shaded as one rounded crown:
- * lit by the crown's outward direction, and darker deep inside it and underneath.
- */
-function growingLeaves<M extends THREE.Material>(mat: M, uniforms: GrowUniforms, key: string, shadeAsCrown: boolean): M {
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", `${DECLARE}\nvarying float vShadeIn;`)
-      .replace(
-        "#include <begin_vertex>",
-        /* glsl */ `#include <begin_vertex>
-float leafGrow = smoothstep(aBirth, aBirth + 0.14, uGrow);
-vec3 leafAt = instanceMatrix[3].xyz;
-float flutter = length(position.xy) * leafGrow;
-transformed.x += sin(uTime * 1.9 + leafAt.x * 3.1 + leafAt.z * 2.3) * 0.05 * flutter;
-transformed.y += cos(uTime * 1.5 + leafAt.y * 2.7 + leafAt.x) * 0.04 * flutter;
-transformed *= leafGrow;
-vec3 inCrown = (leafAt - uCenter) / uRadii;
-vShadeIn = mix(0.42, 1.0, smoothstep(0.3, 1.0, length(inCrown))) * mix(0.7, 1.0, smoothstep(-0.7, 0.3, inCrown.y));`,
-      );
-    if (shadeAsCrown) {
-      shader.vertexShader = shader.vertexShader.replace(
-        "#include <defaultnormal_vertex>",
-        /* glsl */ `#include <defaultnormal_vertex>
-vec3 crownOut = normalize(((instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz - uCenter) / uRadii);
-transformedNormal = normalize(mix(transformedNormal, normalMatrix * crownOut, 0.7));`,
-      );
-      shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", "#include <common>\nvarying float vShadeIn;")
-        .replace("#include <color_fragment>", "#include <color_fragment>\ndiffuseColor.rgb *= vShadeIn;")
-        // the normals now point out of the crown on both sides of each leaf card
-        .replace("#include <normal_fragment_begin>", THREE.ShaderChunk.normal_fragment_begin.replace("normal *= faceDirection;", ""));
-    }
-  };
-  mat.customProgramCacheKey = () => key;
-  return mat;
-}
-
-/** Fruit colour goes from green to its ripe colours (the vertex colours). */
-function ripening(mat: THREE.MeshPhysicalMaterial, ripe: { value: number }) {
+/** Mango skin: each fruit's own colour, a red blush on its shoulder, and green until it ripens. */
+function mangoMaterial(ripe: { value: number }) {
+  const mat = new THREE.MeshPhysicalMaterial({ roughness: 0.38, clearcoat: 0.35, clearcoatRoughness: 0.4 });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uRipe = ripe;
-    shader.uniforms.uUnripe = { value: new THREE.Color("#4d8a2c") };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nattribute float aSide;\nattribute float aBlush;\nvarying float vBlush;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBlush = aSide * aBlush;");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nuniform float uRipe;\nuniform vec3 uUnripe;")
-      .replace("#include <color_fragment>", "#include <color_fragment>\ndiffuseColor.rgb = mix(uUnripe, diffuseColor.rgb, uRipe);");
+      .replace("#include <common>", "#include <common>\nuniform float uRipe;\nvarying float vBlush;")
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `#include <color_fragment>
+diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.5, 0.07, 0.04), vBlush * uRipe);
+diffuseColor.rgb = mix(vec3(0.08, 0.24, 0.03), diffuseColor.rgb, uRipe);`,
+      );
   };
   mat.customProgramCacheKey = () => "mango";
   return mat;
@@ -492,114 +346,98 @@ function ripening(mat: THREE.MeshPhysicalMaterial, ripe: { value: number }) {
 // ---------------------------------------------------------------- component
 
 export default function MangoTree({ story }: { story: Story }) {
-  const uniforms = useMemo<GrowUniforms>(
-    () => ({ uGrow: { value: 0 }, uTime: { value: 0 }, uCenter: { value: CROWN_CENTER.clone() }, uRadii: { value: CROWN_RADII.clone() } }),
-    [],
-  );
+  const camera = useThree((s) => s.camera);
+  const uniforms = useMemo(() => growUniforms(CROWN_CENTER, CROWN_RADII), []);
+  const litterUniforms = useMemo(() => growUniforms(new THREE.Vector3(0, -50, 0), new THREE.Vector3(1, 1, 1)), []);
   const ripe = useMemo(() => ({ value: 0 }), []);
 
-  const limbs = useOwned(limbGeometry);
+  const limbs = useOwned(() => branchGeometry(TREE.branches));
   const barkTex = useOwned(barkTexture);
   const bark = useOwned(() =>
-    growingBark(new THREE.MeshStandardMaterial({ map: barkTex, bumpMap: barkTex, bumpScale: 4, vertexColors: true, roughness: 0.95 }), uniforms, "bark"),
+    growingBark(new THREE.MeshStandardMaterial({ map: barkTex, bumpMap: barkTex, bumpScale: 4, vertexColors: true, roughness: 0.95 }), uniforms, "mango-bark"),
   );
-  const barkDepth = useOwned(() => growingBark(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), uniforms, "bark-depth"));
+  const barkDepth = useOwned(() => growingBark(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), uniforms, "mango-bark-depth"));
 
-  const leafTex = useOwned(leafTexture);
-  const leafGeo = useOwned(() => {
-    const g = new THREE.PlaneGeometry(1, 1); // the rosette's centre is the twig tip
-    g.setAttribute("aBirth", new THREE.InstancedBufferAttribute(Float32Array.from(TREE.leaves.map((l) => l.birth)), 1));
+  const leafGeo = useOwned(() => leafSetGeometry(TREE.leaves));
+  const leafMats = useMemo(() => leafMaterials(uniforms, "mango-leaves"), [uniforms]);
+  const litterGeo = useOwned(() => leafSetGeometry(TREE.litter));
+  const litterMats = useMemo(() => leafMaterials(litterUniforms, "mango-litter", 0.75), [litterUniforms]);
+  useEffect(() => () => [leafMats, litterMats].forEach((m) => { m.color.dispose(); m.depth.dispose(); }), [leafMats, litterMats]);
+  const leaves = useRef<THREE.InstancedMesh>(null);
+  const litter = useRef<THREE.InstancedMesh>(null);
+
+  const mangoGeo = useOwned(() => {
+    const g = mangoGeometry();
+    g.setAttribute("aBlush", new THREE.InstancedBufferAttribute(Float32Array.from(TREE.mangoes.map((m) => m.blush)), 1));
     return g;
   });
-  const leafMat = useOwned(() =>
-    growingLeaves(
-      new THREE.MeshStandardMaterial({ map: leafTex, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.42, shadowSide: THREE.DoubleSide }),
-      uniforms,
-      "leaves",
-      true,
-    ),
-  );
-  const leafDepth = useOwned(() =>
-    growingLeaves(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: 0.5 }), uniforms, "leaves-depth", false),
-  );
-  const leaves = useRef<THREE.InstancedMesh>(null);
-
-  const mangoGeo = useOwned(mangoGeometry);
-  const stalkGeo = useOwned(() => new THREE.CylinderGeometry(0.005, 0.007, 1, 5).translate(0, -0.5, 0));
-  const mangoMat = useOwned(() => ripening(new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.38, clearcoat: 0.45, clearcoatRoughness: 0.35 }), ripe));
-  const stalkMat = useOwned(() => new THREE.MeshStandardMaterial({ color: "#5d6630", roughness: 0.9 }));
-  const fruits = useRef<(THREE.Group | null)[]>([]);
+  const mangoMat = useOwned(() => mangoMaterial(ripe));
+  const stalkGeo = useOwned(() => new THREE.CylinderGeometry(0.004, 0.005, 1, 5).translate(0, -0.5, 0));
+  const stalkMat = useOwned(() => new THREE.MeshStandardMaterial({ color: new THREE.Color(0.1, 0.12, 0.04).multiplyScalar(1.6), roughness: 0.6 }));
+  const fruits = useRef<THREE.InstancedMesh>(null);
+  const stalks = useRef<THREE.InstancedMesh>(null);
 
   const group = useRef<THREE.Group>(null);
-  const tones = useMemo(
-    () => ({
-      shoot: new THREE.Color("#9ccf6a"),
-      bark: new THREE.Color("#ffffff"),
-      flush: new THREE.Color(2.3, 1.15, 0.8), // new mango leaves come out copper-red
-      mature: new THREE.Color(1, 1, 1),
-    }),
+  const tmp = useMemo(
+    () => ({ m: new THREE.Matrix4(), q: new THREE.Quaternion(), q2: new THREE.Quaternion(), e: new THREE.Euler(), p: new THREE.Vector3(), s: new THREE.Vector3(), down: new THREE.Vector3(0, -1, 0) }),
     [],
   );
 
   useEffect(() => {
-    const mesh = leaves.current;
-    if (!mesh) return;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const roll = new THREE.Quaternion();
-    const s = new THREE.Vector3();
-    const c = new THREE.Color();
-    const r = rng(31);
-    const facing = new THREE.Vector3(0, 0, 1);
-    TREE.leaves.forEach((l, i) => {
-      q.setFromUnitVectors(facing, l.dir);
-      roll.setFromAxisAngle(l.dir, l.roll);
-      m.compose(l.pos, roll.multiply(q), s.setScalar(l.size));
-      mesh.setMatrixAt(i, m);
-      const k = 0.85 + r() * 0.3;
-      mesh.setColorAt(i, c.setRGB(k * (0.92 + r() * 0.12), k, k * (0.9 + r() * 0.12)));
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    const l = leaves.current;
+    if (l) {
+      fillLeaves(l, TREE.leaves);
+      // phones and small screens draw part of the (shuffled) leaves, so scrolling stays smooth
+      const lite = window.innerWidth < 820 || ((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) < 4;
+      l.count = lite ? Math.floor(TREE.leaves.length * 0.55) : TREE.leaves.length;
+    }
+    if (litter.current) fillLeaves(litter.current, TREE.litter);
+    const f = fruits.current;
+    if (f) {
+      TREE.mangoes.forEach((m, i) => f.setColorAt(i, m.skin));
+      if (f.instanceColor) f.instanceColor.needsUpdate = true;
+    }
   }, []);
 
   useFrame(() => {
     const { u, time } = story.current;
-    uniforms.uGrow.value = u;
+    for (const un of [uniforms, litterUniforms]) {
+      un.uGrow.value = u;
+      updateLeafLight(un, SUN_DIR, camera, 0.12 + 0.3 * sunAmount(u));
+    }
     uniforms.uTime.value = time;
     group.current?.scale.setScalar(0.5 + 0.5 * smooth(TREE_START, 3.9, u));
-    bark.color.copy(tones.shoot).lerp(tones.bark, smooth(2.9, 3.4, u));
-    leafMat.color.copy(tones.flush).lerp(tones.mature, smooth(3.6, 4.25, u));
+    bark.color.setScalar(1).lerp(new THREE.Color("#a6cf72"), 1 - smooth(2.9, 3.4, u)); // a green shoot that turns to bark
     ripe.value = smooth(4.15, 4.48, u);
 
-    TREE.mangoes.forEach((f, i) => {
-      const g = fruits.current[i];
-      if (!g) return;
-      const s = easeOutBack(smooth(f.birth, f.birth + 0.15, u));
-      g.visible = s > 0.002;
-      g.scale.setScalar(Math.max(0.001, s));
-      // hang, spread a little within the bunch, and swing gently on the stalk
-      g.rotation.set(Math.cos(time * 0.9 + i) * 0.04, f.spin, f.lean + Math.sin(time * 1.1 + i * 1.7) * 0.05, "YXZ");
-    });
+    // mangoes swing gently on their stalks
+    const f = fruits.current;
+    const st = stalks.current;
+    if (f && st) {
+      TREE.mangoes.forEach((m, i) => {
+        const g = easeOutBack(smooth(m.birth, m.birth + 0.15, u));
+        tmp.e.set(m.tilt.x + Math.cos(time * 0.9 + i) * 0.05, 0, m.tilt.z + Math.sin(time * 1.1 + i * 1.7) * 0.06);
+        tmp.q.setFromUnitVectors(tmp.down, m.hang).multiply(tmp.q2.setFromEuler(tmp.e));
+        st.setMatrixAt(i, tmp.m.compose(m.attach, tmp.q, tmp.s.set(Math.max(0.001, g), Math.max(0.001, m.stalk * g), Math.max(0.001, g))));
+        tmp.p.set(0, -m.stalk * g, 0).applyQuaternion(tmp.q).add(m.attach);
+        tmp.q2.setFromAxisAngle(UP, m.spin);
+        f.setMatrixAt(i, tmp.m.compose(tmp.p, tmp.q.clone().multiply(tmp.q2), tmp.s.setScalar(Math.max(0.001, m.size * g))));
+      });
+      f.instanceMatrix.needsUpdate = true;
+      st.instanceMatrix.needsUpdate = true;
+      f.visible = st.visible = u > 3.95;
+    }
   });
 
   return (
-    <group ref={group}>
-      <mesh geometry={limbs} material={bark} customDepthMaterial={barkDepth} castShadow receiveShadow frustumCulled={false} />
-      <instancedMesh
-        ref={leaves}
-        args={[leafGeo, leafMat, TREE.leaves.length]}
-        customDepthMaterial={leafDepth}
-        castShadow
-        receiveShadow
-        frustumCulled={false}
-      />
-      {TREE.mangoes.map((f, i) => (
-        <group key={i} ref={(g) => { fruits.current[i] = g; }} position={f.pos}>
-          <mesh geometry={stalkGeo} material={stalkMat} scale={[1, f.stalk, 1]} />
-          <mesh geometry={mangoGeo} material={mangoMat} position={[0, -f.stalk, 0]} castShadow />
-        </group>
-      ))}
-    </group>
+    <>
+      <group ref={group}>
+        <mesh geometry={limbs} material={bark} customDepthMaterial={barkDepth} castShadow receiveShadow frustumCulled={false} />
+        <instancedMesh ref={leaves} args={[leafGeo, leafMats.color, TREE.leaves.length]} customDepthMaterial={leafMats.depth} castShadow receiveShadow frustumCulled={false} />
+        <instancedMesh ref={fruits} args={[mangoGeo, mangoMat, TREE.mangoes.length]} castShadow frustumCulled={false} />
+        <instancedMesh ref={stalks} args={[stalkGeo, stalkMat, TREE.mangoes.length]} frustumCulled={false} />
+      </group>
+      <instancedMesh ref={litter} args={[litterGeo, litterMats.color, TREE.litter.length]} receiveShadow frustumCulled={false} />
+    </>
   );
 }

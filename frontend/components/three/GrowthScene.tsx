@@ -19,6 +19,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import Atmosphere from "./Atmosphere";
 import Island, { surfaceY } from "./Island";
+import Beanstalks from "./Beanstalk";
 import MangoTree from "./MangoTree";
 import Parakeets, { beakPosition } from "./Parakeets";
 import Weather from "./Weather";
@@ -363,6 +364,7 @@ function Scene({ playIntro, animate }: { playIntro: boolean; animate: boolean })
       <Island story={story} animate={animate} />
       <Seed story={story} />
       <MangoTree story={story} />
+      <Beanstalks story={story} />
       <Weather story={story} animate={animate} />
       <Parakeets story={story} />
       <CameraRig story={story} playIntro={playIntro} animate={animate} />
