@@ -12,6 +12,7 @@ Start-Process powershell -WorkingDirectory $api -ArgumentList "-NoExit", "-Comma
 Write-Host "Starting website on http://localhost:3000 ..." -ForegroundColor Cyan
 Push-Location "$root\frontend"
 try {
+    if (-not (Test-Path ".env.local")) { Copy-Item ".env.local.example" ".env.local" }
     if (-not (Test-Path "node_modules")) { npm install }
     if ($Prod) { npm run start } else { npm run dev }
 }

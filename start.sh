@@ -14,5 +14,6 @@ trap 'kill $API_PID 2>/dev/null || true' EXIT INT TERM
 
 echo "Starting website on http://localhost:3000 ..."
 cd "$ROOT/frontend"
+[ -f .env.local ] || cp .env.local.example .env.local
 [ -d node_modules ] || npm install
 npm run "$WEB"
